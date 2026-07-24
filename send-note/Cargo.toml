@@ -1,0 +1,18 @@
+[package]
+name = "send-note"
+version = "0.1.0"
+edition = "2021"
+
+# Sends a VinilCut mp4 to Telegram as a VIDEO NOTE (round message) from YOUR
+# account — the Rust equivalent of scripts/send_note.py. Uses grammers (native
+# Rust MTProto). The core2 patch is required: the crates.io core2 0.4.0 that
+# grammers-crypto pulls in transitively is yanked.
+
+[dependencies]
+grammers-client  = { git = "https://github.com/Lonami/grammers.git" }
+grammers-session = { git = "https://github.com/Lonami/grammers.git" }
+grammers-tl-types = { git = "https://github.com/Lonami/grammers.git" }
+tokio = { version = "1", features = ["full"] }
+
+[patch.crates-io]
+core2 = { git = "https://github.com/technocreatives/core2" }

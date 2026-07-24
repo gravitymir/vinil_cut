@@ -1,0 +1,17 @@
+# Rust build output (root crate and the send-note sub-crate)
+target/
+
+# Per-render working dir and cached tinted discs
+work/
+
+# Telegram userbot session (grants access to your account — never commit)
+*.session*
+
+# Assets generated at startup (regenerated on first run)
+assets/shine.png
+assets/mask.png
+assets/spindle.png
+assets/font.ttf
+
+# Source image kept only for reference (the shipped grayscale base is assets/disc_base.png)
+assets/disc_source.png
