@@ -14,7 +14,9 @@ assets/spindle.png
 assets/font.ttf
 assets/thumb_vinyl.png
 assets/thumb_reel.png
+assets/thumb_cassette.png
 
-# Source images kept only for reference (shipped bases: disc_base.png, reel_base.png)
+# Source images kept only for reference (shipped bases are the *_base.png files)
 assets/disc_source.png
 assets/reel_source.png
+assets/cassette_source.png

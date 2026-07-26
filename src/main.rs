@@ -145,11 +145,32 @@ async fn ensure_assets() {
         let _ = Command::new("ffmpeg").args(["-y", "-v", "error", "-i", "assets/reel_base.png",
             "-vf", "scale=170:170", "-frames:v", "1", "-update", "1", "assets/thumb_reel.png"]).status().await;
     }
+    if !Path::new("assets/thumb_cassette.png").exists() && Path::new("assets/cassette_base.png").exists() {
+        let _ = Command::new("ffmpeg").args(["-y", "-v", "error", "-i", "assets/cassette_base.png",
+            "-vf", "scale=170:170", "-frames:v", "1", "-update", "1", "assets/thumb_cassette.png"]).status().await;
+    }
+}
+
+// Tape-reel favicon (SVG): reads well from 16px up.
+const FAVICON_SVG: &str = r##"<svg viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg">
+  <circle cx="32" cy="32" r="31" fill="#4a3527"/>
+  <circle cx="32" cy="32" r="31" fill="none" stroke="#d7d1c3" stroke-width="2"/>
+  <g fill="#e9e4d8">
+    <rect x="28" y="7" width="8" height="26" rx="3"/>
+    <rect x="28" y="7" width="8" height="26" rx="3" transform="rotate(120 32 32)"/>
+    <rect x="28" y="7" width="8" height="26" rx="3" transform="rotate(240 32 32)"/>
+  </g>
+  <circle cx="32" cy="32" r="13" fill="#efeae0"/>
+  <circle cx="32" cy="32" r="4" fill="#33312e"/>
+</svg>"##;
+
+async fn favicon() -> Response {
+    ([(header::CONTENT_TYPE, "image/svg+xml")], FAVICON_SVG).into_response()
 }
 
 // Serve a whitelisted gallery thumbnail from assets/.
 async fn media(AxPath(name): AxPath<String>) -> Result<Response, (StatusCode, String)> {
-    if !matches!(name.as_str(), "thumb_vinyl.png" | "thumb_reel.png") {
+    if !matches!(name.as_str(), "thumb_vinyl.png" | "thumb_reel.png" | "thumb_cassette.png") {
         return Err((StatusCode::NOT_FOUND, "not found".into()));
     }
     let bytes = std::fs::read(format!("assets/{name}"))
@@ -212,7 +233,7 @@ fn reel_text_graph(text: &str) -> String {
 // reel via [0:v], so it rotates with it.
 fn reel_center_text_graph(text: &str) -> String {
     let ang = -0.297_f64; // ~17° counter-clockwise
-    let (dx, dy) = (243_i64, -73_i64); // on the right rib
+    let (dx, dy) = (253_i64, -63_i64); // on the right rib
     let ox = 421 + dx - 210;
     let oy = 421 + dy - 50;
     format!(
@@ -220,6 +241,23 @@ fn reel_center_text_graph(text: &str) -> String {
 color=c=#00000000:s=420x100,format=rgba,drawtext=fontfile=assets/font.ttf:text='{text}':\
 fontsize=46:fontcolor=black:x=(w-text_w)/2:y=(h-text_h)/2,rotate={ang:.4}:c=none:ow=420:oh=100[t];\
 [base][t]overlay={ox}:{oy}[out]"
+    )
+}
+
+// Cassette: static transparent shell on a colored background, the two reels
+// spinning in their windows, and a white label (two round cut-outs + caption) on
+// top. Layout is fixed to the 842x842 cassette_base.png; output scaled to `target`.
+fn cassette_filter(bg: &str, caption: &str, target: u32) -> String {
+    format!(
+"color=c={bg}:s=842x842:r=30[bg];\
+[0:v]split=3[cass][l][r];\
+[l]crop=336:336:77:220,format=rgba,geq=r='r(X,Y)':g='g(X,Y)':b='b(X,Y)':a='if(lte(hypot(X-168,Y-168),168),255,0)'[lc];\
+[lc]rotate=a='2*PI*t/4':c=none:ow=336:oh=336[lr];\
+[r]crop=196:196:517:290,format=rgba,geq=r='r(X,Y)':g='g(X,Y)':b='b(X,Y)':a='if(lte(hypot(X-98,Y-98),98),255,0)'[rc];\
+[rc]rotate=a='2*PI*t/4':c=none:ow=196:oh=196[rr];\
+color=c=white:s=842x842,format=rgba,geq=r=255:g=255:b=255:a='if(gt(between(X,25,817)*between(Y,165,600)*gt(hypot(X-245,Y-388),135)*gt(hypot(X-615,Y-388),105),0.5),255,0)',drawtext=fontfile=assets/font.ttf:text='{caption}':fontsize=40:fontcolor=black:x=(w-text_w)/2:y=195[label];\
+[bg][cass]overlay=0:0[b0];[b0][lr]overlay=77:220[b1];[b1][rr]overlay=517:290[b2];[b2][label]overlay=0:0[comp];\
+[comp]scale={target}:{target}[outv]"
     )
 }
 
@@ -282,6 +320,8 @@ async fn main() {
     let jobs: Jobs = Arc::new(Mutex::new(HashMap::new()));
     let app = Router::new()
         .route("/", get(index))
+        .route("/favicon.svg", get(favicon))
+        .route("/favicon.ico", get(favicon))
         .route("/media/:name", get(media))
         .route("/render", post(render))
         .route("/progress/:id", get(progress))
@@ -332,7 +372,8 @@ async fn render(State(jobs): State<Jobs>, mut mp: Multipart) -> Result<Json<serd
     let (lr, lg, lb) = parse_hex(&label_hex);
     // The reel has no center label/cover — text is baked along its rim instead.
     let is_reel = disc_type == "reel";
-    let use_cover = have_cover && !is_reel;
+    let is_cassette = disc_type == "cassette";
+    let use_cover = have_cover && !is_reel && !is_cassette;
     // Caption: user text, or today's date when empty. Sanitized for drawtext.
     let caption = {
         let c = safe_caption(&caption);
@@ -354,7 +395,31 @@ async fn render(State(jobs): State<Jobs>, mut mp: Multipart) -> Result<Json<serd
         }
     }
 
-    // Build the center label + pick the spinning base.
+    let duration = audio_duration(&audio).await.max(0.1);
+    // Video notes are capped at 60s; progress % is against the effective length.
+    let eff = if note { duration.min(60.0) } else { duration };
+    let target: u32 = if note { 512 } else { 848 };
+
+    // Build the ffmpeg args for the chosen object.
+    let mut args: Vec<String> = vec![
+        "-y".into(), "-v".into(), "error".into(), "-nostats".into(),
+        "-progress".into(), "pipe:1".into(),
+    ];
+    if is_cassette {
+        if !Path::new("assets/cassette_base.png").exists() {
+            let _ = std::fs::remove_dir_all(&dir);
+            return Err(ise("assets/cassette_base.png not found — start VinilCut from its project folder."));
+        }
+        let bg = format!("0x{:02x}{:02x}{:02x}", dr, dg, db);
+        args.extend([
+            "-loop".into(), "1".into(), "-i".into(), "assets/cassette_base.png".into(),
+            "-i".into(), audio.to_str().unwrap().into(),
+            "-filter_complex".into(), cassette_filter(&bg, &caption, target),
+            "-map".into(), "[outv]".into(), "-map".into(), "1:a".into(),
+            "-r".into(), "30".into(), "-shortest".into(),
+        ]);
+    } else {
+    // Vinyl / reel: build the center label + pick the spinning base.
     //  - Reel: no center sticker; the date is baked curved along the outer rim, and
     //    a fully transparent placeholder label makes the centered overlay a no-op.
     //  - Vinyl: a 280 colored sticker (cover or date) with a same-color center hole,
@@ -420,10 +485,6 @@ async fn render(State(jobs): State<Jobs>, mut mp: Multipart) -> Result<Json<serd
         }
     };
 
-    let duration = audio_duration(&audio).await.max(0.1);
-    // Video notes are capped at 60s; progress % is against the effective length.
-    let eff = if note { duration.min(60.0) } else { duration };
-
     let graph = match (note, use_cover) {
         (true, true) => GRAPH_NOTE_COVER,
         (true, false) => GRAPH_NOTE_SOLID,
@@ -431,13 +492,11 @@ async fn render(State(jobs): State<Jobs>, mut mp: Multipart) -> Result<Json<serd
         (false, false) => GRAPH_SOLID,
     };
 
-    // Build the final render args, with -progress on stdout.
-    let mut args: Vec<String> = vec![
-        "-y".into(), "-v".into(), "error".into(), "-nostats".into(), "-progress".into(), "pipe:1".into(),
+    args.extend([
         "-loop".into(), "1".into(), "-i".into(), label.to_str().unwrap().into(),
         "-loop".into(), "1".into(), "-i".into(), disc_png.to_str().unwrap().into(),
         "-i".into(), audio.to_str().unwrap().into(),
-    ];
+    ]);
     if use_cover {
         args.extend(["-loop".into(), "1".into(), "-i".into(), cover_png.to_str().unwrap().into()]);
     }
@@ -445,6 +504,7 @@ async fn render(State(jobs): State<Jobs>, mut mp: Multipart) -> Result<Json<serd
     args.extend(["-filter_complex".into(), graph.into()]);
     args.extend(["-map".into(), "[outv]".into(), "-map".into(), "2:a".into(),
                  "-r".into(), "30".into(), "-shortest".into()]);
+    }
     if note {
         args.extend(["-t".into(), "60".into()]);
     }
@@ -539,6 +599,8 @@ const INDEX_HTML: &str = r##"<!doctype html>
 <html lang="en"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>VinilCut</title>
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
+<link rel="alternate icon" href="/favicon.ico">
 <style>
   * { box-sizing: border-box; }
   body { font-family: system-ui, "Segoe UI", sans-serif; margin: 0; padding: 24px;
@@ -584,6 +646,9 @@ const INDEX_HTML: &str = r##"<!doctype html>
       </button>
       <button type="button" class="tile" data-type="reel">
         <img src="/media/thumb_reel.png" alt="Tape reel"><span>Reel</span>
+      </button>
+      <button type="button" class="tile" data-type="cassette">
+        <img src="/media/thumb_cassette.png" alt="Cassette"><span>Cassette</span>
       </button>
     </div>
     <label>Cover image (optional)</label>
