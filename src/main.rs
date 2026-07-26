@@ -207,6 +207,25 @@ fn reel_text_graph(text: &str) -> String {
     g
 }
 
+// Straight caption centered over the reel hub (baked onto [0:v]); used for short
+// captions that fit the central part.
+fn reel_center_text_graph(text: &str) -> String {
+    format!(
+        "[0:v]drawtext=fontfile=assets/font.ttf:text='{text}':fontsize=46:fontcolor=white:\
+borderw=3:bordercolor=black@0.75:x=(w-text_w)/2:y=(h-text_h)/2[out]"
+    )
+}
+
+// Strip characters that would break an ffmpeg drawtext expression, and cap length.
+fn safe_caption(s: &str) -> String {
+    s.chars()
+        .filter(|c| !matches!(c, '\'' | '\\' | ':' | '%' | '{' | '}' | '\n' | '\r'))
+        .take(40)
+        .collect::<String>()
+        .trim()
+        .to_string()
+}
+
 async fn audio_duration(path: &Path) -> f64 {
     let out = Command::new("ffprobe")
         .args(["-v", "error", "-show_entries", "format=duration", "-of", "default=nk=1:nw=1"])
@@ -267,6 +286,7 @@ async fn render(State(jobs): State<Jobs>, mut mp: Multipart) -> Result<Json<serd
     let mut disc_hex = String::from("#2e2e34");
     let mut label_hex = String::from("#000000");
     let mut disc_type = String::from("vinyl");
+    let mut caption = String::new();
     while let Some(field) = mp.next_field().await.map_err(bad)? {
         let name = field.name().unwrap_or("").to_string();
         let data = field.bytes().await.map_err(bad)?;
@@ -277,6 +297,7 @@ async fn render(State(jobs): State<Jobs>, mut mp: Multipart) -> Result<Json<serd
             "disc_color" if !data.is_empty() => { disc_hex = String::from_utf8_lossy(&data).into_owned(); }
             "label_color" if !data.is_empty() => { label_hex = String::from_utf8_lossy(&data).into_owned(); }
             "disc_type" if !data.is_empty() => { disc_type = String::from_utf8_lossy(&data).trim().to_string(); }
+            "text" => { caption = String::from_utf8_lossy(&data).into_owned(); }
             _ => {}
         }
     }
@@ -285,6 +306,11 @@ async fn render(State(jobs): State<Jobs>, mut mp: Multipart) -> Result<Json<serd
     // The reel has no center label/cover — text is baked along its rim instead.
     let is_reel = disc_type == "reel";
     let use_cover = have_cover && !is_reel;
+    // Caption: user text, or today's date when empty. Sanitized for drawtext.
+    let caption = {
+        let c = safe_caption(&caption);
+        if c.is_empty() { chrono::Local::now().format("%d.%m.%Y").to_string() } else { c }
+    };
     if !have_audio {
         let _ = std::fs::remove_dir_all(&dir);
         return Err((StatusCode::BAD_REQUEST, "An audio file is required.".into()));
@@ -318,10 +344,16 @@ async fn render(State(jobs): State<Jobs>, mut mp: Multipart) -> Result<Json<serd
             label.to_str().unwrap(),
         ]).status().await.map(|s| s.success()).unwrap_or(false);
         let reel_text = dir.join("reel_text.png");
-        let date = chrono::Local::now().format("%d.%m.%Y").to_string();
+        // Short captions (<= 10 chars, e.g. a date) sit in the central part;
+        // longer ones curve along the outer rim.
+        let reel_graph = if caption.chars().count() <= 10 {
+            reel_center_text_graph(&caption)
+        } else {
+            reel_text_graph(&caption)
+        };
         let baked = Command::new("ffmpeg").args([
             "-y", "-v", "error", "-i", "assets/reel_base.png",
-            "-filter_complex", &reel_text_graph(&date),
+            "-filter_complex", &reel_graph,
             "-map", "[out]", "-frames:v", "1", "-update", "1", reel_text.to_str().unwrap(),
         ]).status().await.map(|s| s.success()).unwrap_or(false);
         if !placeholder || !baked {
@@ -345,10 +377,9 @@ async fn render(State(jobs): State<Jobs>, mut mp: Multipart) -> Result<Json<serd
                 "-map", "[out]", "-frames:v", "1", label.to_str().unwrap(),
             ]).status().await.map(|s| s.success()).unwrap_or(false)
         } else {
-            let date = chrono::Local::now().format("%d.%m.%Y").to_string();
             Command::new("ffmpeg").args([
                 "-y", "-v", "error", "-f", "lavfi", "-i", "color=c=black:s=280x280",
-                "-filter_complex", &default_label_graph(&date, lr, lg, lb),
+                "-filter_complex", &default_label_graph(&caption, lr, lg, lb),
                 "-map", "[out]", "-frames:v", "1", label.to_str().unwrap(),
             ]).status().await.map(|s| s.success()).unwrap_or(false)
         };
@@ -492,8 +523,8 @@ const INDEX_HTML: &str = r##"<!doctype html>
           padding: 20px; width: 100%; max-width: 460px; }
   label { display:block; font-size: 13px; color:#9aa4b2; margin: 12px 0 6px; }
   .hint { font-size: 12px; color:#6b7280; margin-top: 4px; }
-  input[type=file] { width: 100%; padding: 10px; background:#0f1116; color:#ddd;
-          border:1px solid #2a2f3a; border-radius:8px; font-size: 13px; }
+  input[type=file], input[type=text] { width: 100%; padding: 10px; background:#0f1116;
+          color:#ddd; border:1px solid #2a2f3a; border-radius:8px; font-size: 13px; }
   input[type=color] { width: 56px; height: 36px; padding: 2px; background:#0f1116;
           border:1px solid #2a2f3a; border-radius:8px; cursor: pointer; }
   .gallery { display:flex; gap:12px; }
@@ -533,6 +564,9 @@ const INDEX_HTML: &str = r##"<!doctype html>
     <div class="hint">Leave empty &rarr; a default label with today's date is used.</div>
     <label>Audio file</label>
     <input type="file" id="audio" accept="audio/*">
+    <label>Caption (optional)</label>
+    <input type="text" id="title" maxlength="40" placeholder="Empty = today's date">
+    <div class="hint">&le;10 chars sit in the center; longer curves along the rim (reel) / label (vinyl).</div>
     <div id="colorRow" style="display:flex;gap:24px;margin-top:12px;">
       <div>
         <label style="margin:0 0 6px;">Vinyl color</label>
@@ -581,6 +615,7 @@ const INDEX_HTML: &str = r##"<!doctype html>
       fd.append("audio", aud);
       if ($("note").checked) fd.append("mode", "note");
       fd.append("disc_type", discType);
+      fd.append("text", $("title").value);
       fd.append("disc_color", $("discColor").value);
       fd.append("label_color", $("labelColor").value);
       go.disabled = true; video.style.display = "none"; dl.style.display = "none";
