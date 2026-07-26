@@ -199,7 +199,7 @@ fn reel_text_graph(text: &str) -> String {
         let ox = (cx + r * th.sin() - half).round() as i64;
         let oy = (cy - r * th.cos() - half).round() as i64;
         g.push_str(&format!(
-            "color=c=#00000000:s=60x60,format=rgba,drawtext=fontfile=assets/font.ttf:text='{ch}':fontsize=40:fontcolor=white:borderw=3:bordercolor=black@0.75:x=(w-text_w)/2:y=(h-text_h)/2,rotate=a={th:.4}:c=none[g{n1}];[t{i}][g{n1}]overlay={ox}:{oy}[t{n1}];",
+            "color=c=#00000000:s=60x60,format=rgba,drawtext=fontfile=assets/font.ttf:text='{ch}':fontsize=40:fontcolor=black:x=(w-text_w)/2:y=(h-text_h)/2,rotate=a={th:.4}:c=none[g{n1}];[t{i}][g{n1}]overlay={ox}:{oy}[t{n1}];",
             n1 = i + 1
         ));
     }
@@ -211,8 +211,8 @@ fn reel_text_graph(text: &str) -> String {
 // captions that fit the central part.
 fn reel_center_text_graph(text: &str) -> String {
     format!(
-        "[0:v]drawtext=fontfile=assets/font.ttf:text='{text}':fontsize=46:fontcolor=white:\
-borderw=3:bordercolor=black@0.75:x=(w-text_w)/2:y=(h-text_h)/2[out]"
+        "[0:v]drawtext=fontfile=assets/font.ttf:text='{text}':fontsize=46:fontcolor=black:\
+x=(w-text_w)/2:y=(h-text_h)/2[out]"
     )
 }
 
