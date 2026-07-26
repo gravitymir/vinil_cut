@@ -211,8 +211,8 @@ fn reel_text_graph(text: &str) -> String {
 // counter-clockwise (negative angle) and shifted right of the hub. Baked onto the
 // reel via [0:v], so it rotates with it.
 fn reel_center_text_graph(text: &str) -> String {
-    let ang = -0.314_f64; // ~18° counter-clockwise (20° CCW, then 2° back clockwise)
-    let (dx, dy) = (148_i64, -12_i64);
+    let ang = -0.297_f64; // ~17° counter-clockwise
+    let (dx, dy) = (283_i64, -12_i64); // out along the right rib (~5.5 char-widths right)
     let ox = 421 + dx - 210;
     let oy = 421 + dy - 50;
     format!(
