@@ -135,6 +135,26 @@ async fn ensure_assets() {
             if std::fs::copy(src, "assets/font.ttf").is_ok() { break; }
         }
     }
+    // Gallery thumbnails for the disc/reel picker.
+    if !Path::new("assets/thumb_vinyl.png").exists() {
+        let tint = "geq=r='clip(46*r(X,Y)/140,0,255)':g='clip(46*g(X,Y)/140,0,255)':b='clip(52*b(X,Y)/140,0,255)':a='alpha(X,Y)',scale=170:170";
+        let _ = Command::new("ffmpeg").args(["-y", "-v", "error", "-i", "assets/disc_base.png",
+            "-vf", tint, "-frames:v", "1", "-update", "1", "assets/thumb_vinyl.png"]).status().await;
+    }
+    if !Path::new("assets/thumb_reel.png").exists() {
+        let _ = Command::new("ffmpeg").args(["-y", "-v", "error", "-i", "assets/reel_base.png",
+            "-vf", "scale=170:170", "-frames:v", "1", "-update", "1", "assets/thumb_reel.png"]).status().await;
+    }
+}
+
+// Serve a whitelisted gallery thumbnail from assets/.
+async fn media(AxPath(name): AxPath<String>) -> Result<Response, (StatusCode, String)> {
+    if !matches!(name.as_str(), "thumb_vinyl.png" | "thumb_reel.png") {
+        return Err((StatusCode::NOT_FOUND, "not found".into()));
+    }
+    let bytes = std::fs::read(format!("assets/{name}"))
+        .map_err(|_| (StatusCode::NOT_FOUND, "not found".into()))?;
+    Ok(([(header::CONTENT_TYPE, "image/png")], bytes).into_response())
 }
 
 fn default_label_graph(date: &str, cr: u8, cg: u8, cb: u8) -> String {
@@ -154,6 +174,32 @@ fn default_label_graph(date: &str, cr: u8, cg: u8, cb: u8) -> String {
         let oy = (c - r * th.cos() - half).round() as i64;
         g.push_str(&format!(
             "color=c=#00000000:s=44x44,format=rgba,drawtext=fontfile=assets/font.ttf:text='{ch}':fontsize=26:fontcolor=white:x=(w-text_w)/2:y=(h-text_h)/2,rotate=a={th:.4}:c=none[g{n1}];[t{i}][g{n1}]overlay={ox}:{oy}[t{n1}];",
+            n1 = i + 1
+        ));
+    }
+    g.push_str(&format!("[t{n}]null[out]"));
+    g
+}
+
+// Bake `text` curved along the reel's outer rim (radius ~R on the 842x842 reel),
+// starting from the reel image itself ([0:v]). Each glyph is rotated tangentially
+// and sits near the top of the rim; the whole ring rotates with the reel. A black
+// outline keeps it legible over both the clear flange and the dark tape.
+fn reel_text_graph(text: &str) -> String {
+    let cx = 421.0_f64;
+    let cy = 421.0_f64;
+    let r = 372.0_f64; // on the rim, just inside the outer edge
+    let step = 46.0 / r; // angular spacing per glyph (~arc length 46px)
+    let half = 30.0_f64; // half of the 60px glyph box
+    let chars: Vec<char> = text.chars().collect();
+    let n = chars.len();
+    let mut g = String::from("[0:v]format=rgba[t0];");
+    for (i, ch) in chars.iter().enumerate() {
+        let th = (i as f64 - (n as f64 - 1.0) / 2.0) * step;
+        let ox = (cx + r * th.sin() - half).round() as i64;
+        let oy = (cy - r * th.cos() - half).round() as i64;
+        g.push_str(&format!(
+            "color=c=#00000000:s=60x60,format=rgba,drawtext=fontfile=assets/font.ttf:text='{ch}':fontsize=40:fontcolor=white:borderw=3:bordercolor=black@0.75:x=(w-text_w)/2:y=(h-text_h)/2,rotate=a={th:.4}:c=none[g{n1}];[t{i}][g{n1}]overlay={ox}:{oy}[t{n1}];",
             n1 = i + 1
         ));
     }
@@ -190,6 +236,7 @@ async fn main() {
     let jobs: Jobs = Arc::new(Mutex::new(HashMap::new()));
     let app = Router::new()
         .route("/", get(index))
+        .route("/media/:name", get(media))
         .route("/render", post(render))
         .route("/progress/:id", get(progress))
         .route("/result/:id", get(result))
@@ -219,6 +266,7 @@ async fn render(State(jobs): State<Jobs>, mut mp: Multipart) -> Result<Json<serd
     let mut note = false;
     let mut disc_hex = String::from("#2e2e34");
     let mut label_hex = String::from("#000000");
+    let mut disc_type = String::from("vinyl");
     while let Some(field) = mp.next_field().await.map_err(bad)? {
         let name = field.name().unwrap_or("").to_string();
         let data = field.bytes().await.map_err(bad)?;
@@ -228,18 +276,22 @@ async fn render(State(jobs): State<Jobs>, mut mp: Multipart) -> Result<Json<serd
             "mode" => { note = data.as_ref() == b"note"; }
             "disc_color" if !data.is_empty() => { disc_hex = String::from_utf8_lossy(&data).into_owned(); }
             "label_color" if !data.is_empty() => { label_hex = String::from_utf8_lossy(&data).into_owned(); }
+            "disc_type" if !data.is_empty() => { disc_type = String::from_utf8_lossy(&data).trim().to_string(); }
             _ => {}
         }
     }
     let (dr, dg, db) = parse_hex(&disc_hex);
     let (lr, lg, lb) = parse_hex(&label_hex);
+    // The reel has no center label/cover — text is baked along its rim instead.
+    let is_reel = disc_type == "reel";
+    let use_cover = have_cover && !is_reel;
     if !have_audio {
         let _ = std::fs::remove_dir_all(&dir);
         return Err((StatusCode::BAD_REQUEST, "An audio file is required.".into()));
     }
 
     // Normalize any cover format (png/jpg/webp/avif/heif/…) to a plain PNG first.
-    if have_cover {
+    if use_cover {
         let ok = Command::new("ffmpeg")
             .args(["-y", "-v", "error", "-i", cover.to_str().unwrap(), "-frames:v", "1", cover_png.to_str().unwrap()])
             .status().await.map(|s| s.success()).unwrap_or(false);
@@ -249,47 +301,72 @@ async fn render(State(jobs): State<Jobs>, mut mp: Multipart) -> Result<Json<serd
         }
     }
 
-    // Build the 280x280 label: a colored sticker (label_color) with the cover on
-    // top (leaving a thin colored rim) and a small center HOLE punched in the same
-    // label color — no metal spindle, so black label -> black hole, white -> white.
+    // Build the center label + pick the spinning base.
+    //  - Reel: no center sticker; the date is baked curved along the outer rim, and
+    //    a fully transparent placeholder label makes the centered overlay a no-op.
+    //  - Vinyl: a 280 colored sticker (cover or date) with a same-color center hole,
+    //    over the tinted disc.
     let label_col = format!("0x{:02x}{:02x}{:02x}", lr, lg, lb);
-    let lbl_ok = if have_cover {
-        Command::new("ffmpeg").args([
-            "-y", "-v", "error",
-            "-i", cover_png.to_str().unwrap(), "-i", "assets/mask.png",
-            "-f", "lavfi", "-i", &format!("color=c={label_col}:s=280x280"),
-            "-f", "lavfi", "-i", &format!("color=c={label_col}:s=24x24"),
-            "-filter_complex",
-            "[2:v]format=rgba[base];\
+    let disc_png: PathBuf = if is_reel {
+        if !Path::new("assets/reel_base.png").exists() {
+            let _ = std::fs::remove_dir_all(&dir);
+            return Err(ise("assets/reel_base.png not found — start VinilCut from its project folder."));
+        }
+        let placeholder = Command::new("ffmpeg").args([
+            "-y", "-v", "error", "-f", "lavfi", "-i", "color=c=black:s=16x16",
+            "-vf", "format=rgba,geq=r=0:g=0:b=0:a=0", "-frames:v", "1", "-update", "1",
+            label.to_str().unwrap(),
+        ]).status().await.map(|s| s.success()).unwrap_or(false);
+        let reel_text = dir.join("reel_text.png");
+        let date = chrono::Local::now().format("%d.%m.%Y").to_string();
+        let baked = Command::new("ffmpeg").args([
+            "-y", "-v", "error", "-i", "assets/reel_base.png",
+            "-filter_complex", &reel_text_graph(&date),
+            "-map", "[out]", "-frames:v", "1", "-update", "1", reel_text.to_str().unwrap(),
+        ]).status().await.map(|s| s.success()).unwrap_or(false);
+        if !placeholder || !baked {
+            let _ = std::fs::remove_dir_all(&dir);
+            return Err(ise("failed to build the reel."));
+        }
+        reel_text
+    } else {
+        let lbl_ok = if use_cover {
+            Command::new("ffmpeg").args([
+                "-y", "-v", "error",
+                "-i", cover_png.to_str().unwrap(), "-i", "assets/mask.png",
+                "-f", "lavfi", "-i", &format!("color=c={label_col}:s=280x280"),
+                "-f", "lavfi", "-i", &format!("color=c={label_col}:s=24x24"),
+                "-filter_complex",
+                "[2:v]format=rgba[base];\
 [0:v]scale=236:236:force_original_aspect_ratio=increase,crop=236:236[c];\
 [base][c]overlay=(W-w)/2:(H-h)/2[m];\
 [3:v]format=rgba,geq=r='r(X,Y)':g='g(X,Y)':b='b(X,Y)':a='if(lte(hypot(X-12,Y-12),9),255,0)'[hole];\
 [m][hole]overlay=(W-w)/2:(H-h)/2[mh];[mh][1:v]alphamerge[out]",
-            "-map", "[out]", "-frames:v", "1", label.to_str().unwrap(),
-        ]).status().await.map(|s| s.success()).unwrap_or(false)
-    } else {
-        let date = chrono::Local::now().format("%d.%m.%Y").to_string();
-        Command::new("ffmpeg").args([
-            "-y", "-v", "error", "-f", "lavfi", "-i", "color=c=black:s=280x280",
-            "-filter_complex", &default_label_graph(&date, lr, lg, lb),
-            "-map", "[out]", "-frames:v", "1", label.to_str().unwrap(),
-        ]).status().await.map(|s| s.success()).unwrap_or(false)
-    };
-    if !lbl_ok {
-        let _ = std::fs::remove_dir_all(&dir);
-        return Err(ise("failed to build label"));
-    }
-
-    let disc_png = match ensure_disc(dr, dg, db).await {
-        Ok(p) => p,
-        Err(e) => { let _ = std::fs::remove_dir_all(&dir); return Err(ise(e)); }
+                "-map", "[out]", "-frames:v", "1", label.to_str().unwrap(),
+            ]).status().await.map(|s| s.success()).unwrap_or(false)
+        } else {
+            let date = chrono::Local::now().format("%d.%m.%Y").to_string();
+            Command::new("ffmpeg").args([
+                "-y", "-v", "error", "-f", "lavfi", "-i", "color=c=black:s=280x280",
+                "-filter_complex", &default_label_graph(&date, lr, lg, lb),
+                "-map", "[out]", "-frames:v", "1", label.to_str().unwrap(),
+            ]).status().await.map(|s| s.success()).unwrap_or(false)
+        };
+        if !lbl_ok {
+            let _ = std::fs::remove_dir_all(&dir);
+            return Err(ise("failed to build label"));
+        }
+        match ensure_disc(dr, dg, db).await {
+            Ok(p) => p,
+            Err(e) => { let _ = std::fs::remove_dir_all(&dir); return Err(ise(e)); }
+        }
     };
 
     let duration = audio_duration(&audio).await.max(0.1);
     // Video notes are capped at 60s; progress % is against the effective length.
     let eff = if note { duration.min(60.0) } else { duration };
 
-    let graph = match (note, have_cover) {
+    let graph = match (note, use_cover) {
         (true, true) => GRAPH_NOTE_COVER,
         (true, false) => GRAPH_NOTE_SOLID,
         (false, true) => GRAPH_COVER,
@@ -303,7 +380,7 @@ async fn render(State(jobs): State<Jobs>, mut mp: Multipart) -> Result<Json<serd
         "-loop".into(), "1".into(), "-i".into(), disc_png.to_str().unwrap().into(),
         "-i".into(), audio.to_str().unwrap().into(),
     ];
-    if have_cover {
+    if use_cover {
         args.extend(["-loop".into(), "1".into(), "-i".into(), cover_png.to_str().unwrap().into()]);
     }
     args.extend(["-loop".into(), "1".into(), "-i".into(), "assets/shine.png".into()]);
@@ -419,6 +496,13 @@ const INDEX_HTML: &str = r##"<!doctype html>
           border:1px solid #2a2f3a; border-radius:8px; font-size: 13px; }
   input[type=color] { width: 56px; height: 36px; padding: 2px; background:#0f1116;
           border:1px solid #2a2f3a; border-radius:8px; cursor: pointer; }
+  .gallery { display:flex; gap:12px; }
+  .tile { margin:0; width:auto; flex:1; background:#0f1116; border:2px solid #2a2f3a;
+          border-radius:10px; padding:8px; cursor:pointer; color:#9aa4b2;
+          display:flex; flex-direction:column; align-items:center; gap:6px;
+          font-size:13px; font-weight:600; transition: border-color .15s, color .15s; }
+  .tile img { width:100%; border-radius:8px; display:block; background:#000; }
+  .tile.selected { border-color:#3275ac; color:#e6ebf2; }
   button { margin-top: 18px; width: 100%; padding: 12px; font-size: 15px; font-weight: 700;
            border: none; border-radius: 8px; background: #3275ac; color: #fff; cursor: pointer; }
   button:disabled { opacity: .5; cursor: not-allowed; }
@@ -435,12 +519,21 @@ const INDEX_HTML: &str = r##"<!doctype html>
   <h1>VinilCut</h1>
   <div class="sub">Cover + audio &rarr; spinning vinyl video (Telegram round note by default)</div>
   <div class="card">
+    <label>Spinning object</label>
+    <div class="gallery" id="gallery">
+      <button type="button" class="tile selected" data-type="vinyl">
+        <img src="/media/thumb_vinyl.png" alt="Vinyl record"><span>Vinyl</span>
+      </button>
+      <button type="button" class="tile" data-type="reel">
+        <img src="/media/thumb_reel.png" alt="Tape reel"><span>Reel</span>
+      </button>
+    </div>
     <label>Cover image (optional)</label>
     <input type="file" id="image" accept="image/*">
     <div class="hint">Leave empty &rarr; a default label with today's date is used.</div>
     <label>Audio file</label>
     <input type="file" id="audio" accept="audio/*">
-    <div style="display:flex;gap:24px;margin-top:12px;">
+    <div id="colorRow" style="display:flex;gap:24px;margin-top:12px;">
       <div>
         <label style="margin:0 0 6px;">Vinyl color</label>
         <input type="color" id="discColor" value="#2e2e34">
@@ -470,6 +563,16 @@ const INDEX_HTML: &str = r##"<!doctype html>
     function setStatus(m, err){ status.textContent = m || ""; status.className = "status" + (err ? " err" : ""); }
     const sleep = ms => new Promise(r => setTimeout(r, ms));
 
+    let discType = "vinyl";
+    document.querySelectorAll("#gallery .tile").forEach(t => {
+      t.addEventListener("click", () => {
+        document.querySelectorAll("#gallery .tile").forEach(x => x.classList.remove("selected"));
+        t.classList.add("selected");
+        discType = t.dataset.type;
+        $("colorRow").style.display = (discType === "reel") ? "none" : "flex";
+      });
+    });
+
     go.addEventListener("click", async () => {
       const img = $("image").files[0], aud = $("audio").files[0];
       if (!aud) { setStatus("Choose an audio file.", true); return; }
@@ -477,6 +580,7 @@ const INDEX_HTML: &str = r##"<!doctype html>
       if (img) fd.append("image", img);
       fd.append("audio", aud);
       if ($("note").checked) fd.append("mode", "note");
+      fd.append("disc_type", discType);
       fd.append("disc_color", $("discColor").value);
       fd.append("label_color", $("labelColor").value);
       go.disabled = true; video.style.display = "none"; dl.style.display = "none";

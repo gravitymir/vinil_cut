@@ -12,6 +12,9 @@ assets/shine.png
 assets/mask.png
 assets/spindle.png
 assets/font.ttf
+assets/thumb_vinyl.png
+assets/thumb_reel.png
 
-# Source image kept only for reference (the shipped grayscale base is assets/disc_base.png)
+# Source images kept only for reference (shipped bases: disc_base.png, reel_base.png)
 assets/disc_source.png
+assets/reel_source.png
