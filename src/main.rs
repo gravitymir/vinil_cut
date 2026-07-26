@@ -249,8 +249,28 @@ fn parse_out_time(line: &str) -> Option<f64> {
     Some(h * 3600.0 + m * 60.0 + s)
 }
 
+// Assets are referenced by relative paths, so the working dir must contain them.
+// When the .exe is launched directly (cwd != project root), walk up from the
+// executable's location until we find assets/disc_base.png and chdir there.
+fn locate_project_root() {
+    if Path::new("assets/disc_base.png").exists() {
+        return;
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        let mut dir = exe.parent().map(|p| p.to_path_buf());
+        while let Some(d) = dir {
+            if d.join("assets/disc_base.png").exists() {
+                let _ = std::env::set_current_dir(&d);
+                return;
+            }
+            dir = d.parent().map(|p| p.to_path_buf());
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() {
+    locate_project_root();
     ensure_assets().await;
     let jobs: Jobs = Arc::new(Mutex::new(HashMap::new()));
     let app = Router::new()
