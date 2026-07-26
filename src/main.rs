@@ -212,7 +212,7 @@ fn reel_text_graph(text: &str) -> String {
 // reel via [0:v], so it rotates with it.
 fn reel_center_text_graph(text: &str) -> String {
     let ang = -0.297_f64; // ~17° counter-clockwise
-    let (dx, dy) = (283_i64, -12_i64); // out along the right rib (~5.5 char-widths right)
+    let (dx, dy) = (253_i64, -58_i64); // on the right rib: right, and up ~one font height
     let ox = 421 + dx - 210;
     let oy = 421 + dy - 50;
     format!(
